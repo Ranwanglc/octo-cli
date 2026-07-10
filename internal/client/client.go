@@ -416,6 +416,7 @@ func sanitizeDryRunHeader(name, value string) string {
 	}
 	switch strings.ToLower(name) {
 	case "authorization", "proxy-authorization",
+		"cookie", "set-cookie",
 		"x-api-key", "x-auth-token", "x-access-token":
 		return maskHeaderValue(value)
 	}
