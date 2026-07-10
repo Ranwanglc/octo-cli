@@ -49,7 +49,13 @@ type Options struct {
 // For non-JSON payloads (e.g. multipart uploads) set RawBody + ContentType.
 // When RawBody is non-nil, Body is ignored and no JSON marshaling is performed.
 type Request struct {
-	Service     string
+	Service string
+	// BaseURLEnv is the spec-declared x-octo-base-url env var name for this
+	// operation (e.g. "OCTO_DOC_API_URL"). Used only to make the
+	// "no base URL configured" error hint point at the right env var when
+	// Config.ServiceURL returns empty. When empty the hint falls back to
+	// OCTO_API_BASE_URL, preserving historical behaviour for bot-domain ops.
+	BaseURLEnv  string
 	Method      string
 	Path        string
 	Query       url.Values
@@ -123,9 +129,13 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 	}
 	base := c.cfg.ServiceURL(req.Service)
 	if base == "" {
+		hintEnv := config.EnvAPIBaseURL
+		if req.BaseURLEnv != "" {
+			hintEnv = req.BaseURLEnv
+		}
 		return nil, output.ErrValidation(
 			fmt.Sprintf("no base URL configured for service %q", req.Service),
-			fmt.Sprintf("set %s", config.EnvAPIBaseURL),
+			fmt.Sprintf("set %s", hintEnv),
 		)
 	}
 

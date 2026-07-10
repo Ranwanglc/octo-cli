@@ -198,7 +198,13 @@ type OperationDetail struct {
 	ResponseSchema *SchemaInfo     `json:"response_schema,omitempty"`
 	Pagination     *PaginationInfo `json:"pagination,omitempty"`
 	BaseURLEnv     string          `json:"base_url_env,omitempty"`
-	SpaceHeader    bool            `json:"space_header,omitempty"`
+	// TokenEnv is the spec-declared env var name (x-octo-token-env) that
+	// supplies the Authorization bearer token for this operation. When
+	// non-empty the service engine bypasses the bot-credential chain and
+	// reads the token from os.Getenv(TokenEnv) — used by the html domain
+	// (OCTO_DOC_WRITE_TOKEN) which targets a separate product surface.
+	TokenEnv    string `json:"token_env,omitempty"`
+	SpaceHeader bool   `json:"space_header,omitempty"`
 	// SpaceHeaderSet records whether the spec declared x-octo-space-header at
 	// all. It lets the transport distinguish an explicit `false` (suppress the
 	// X-Space-Id header) from an omitted flag (keep the default behaviour of
@@ -319,6 +325,7 @@ func buildDetail(service string, doc map[string]any, pathStr, method string, op 
 			Risk:    stringOf(op["x-octo-risk"]),
 		},
 		BaseURLEnv:  stringOf(doc["x-octo-base-url"]),
+		TokenEnv:    stringOf(doc["x-octo-token-env"]),
 		SpaceHeader: boolOf(doc["x-octo-space-header"]),
 	}
 	_, d.SpaceHeaderSet = doc["x-octo-space-header"]

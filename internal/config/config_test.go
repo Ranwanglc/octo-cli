@@ -63,3 +63,36 @@ func TestServiceURL_Unified(t *testing.T) {
 		}
 	}
 }
+
+// TestServiceURL_SpecEnvName pins the fail-loud path added for spec-driven
+// backends other than the bot API: when the service key is a well-formed
+// env-var name (all-caps + underscore), ServiceURL returns os.Getenv(name)
+// verbatim — empty means "no base URL configured", so client.Do reports the
+// mistake with a hint at the correct env var. Falling back to APIBaseURL here
+// would silently route html-domain traffic to the bot backend.
+func TestServiceURL_SpecEnvName(t *testing.T) {
+	cfg := &Config{APIBaseURL: "http://bot.example"}
+
+	// EnvAPIBaseURL is the sentinel for the bot API — always resolves.
+	if got := cfg.ServiceURL(EnvAPIBaseURL); got != "http://bot.example" {
+		t.Errorf("ServiceURL(EnvAPIBaseURL) = %q, want bot API base", got)
+	}
+
+	// A spec-declared env name with the value set: return that value.
+	t.Setenv(EnvDocAPIBaseURL, "http://docs.example")
+	if got := cfg.ServiceURL(EnvDocAPIBaseURL); got != "http://docs.example" {
+		t.Errorf("ServiceURL(OCTO_DOC_API_URL) = %q, want the env value", got)
+	}
+
+	// A spec-declared env name that is UNSET: empty string, NOT bot base
+	// (this is the fail-loud guarantee the html domain depends on).
+	t.Setenv(EnvDocAPIBaseURL, "")
+	if got := cfg.ServiceURL(EnvDocAPIBaseURL); got != "" {
+		t.Errorf("ServiceURL(unset OCTO_DOC_API_URL) = %q, want empty (must not fall back to bot base)", got)
+	}
+
+	// An unknown well-formed env name behaves the same: env value or empty.
+	if got := cfg.ServiceURL("OCTO_MISC_URL"); got != "" {
+		t.Errorf("ServiceURL(unset OCTO_MISC_URL) = %q, want empty", got)
+	}
+}

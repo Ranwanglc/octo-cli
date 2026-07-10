@@ -112,3 +112,40 @@ func TestNewRootCmd_LeafStillRequiresAuth(t *testing.T) {
 		t.Errorf("leaf should hit auth gate (type=auth_error), got type=%q msg=%s", ee.Type, ee.Message)
 	}
 }
+
+// TestNewRootCmd_HTMLLeafSkipsBotTokenGate is the symmetric counterpart to
+// TestNewRootCmd_LeafStillRequiresAuth: an html leaf must pass PersistentPreRunE
+// without OCTO_BOT_TOKEN because the html domain declares x-octo-token-env and
+// authenticates via OCTO_DOC_WRITE_TOKEN at the op layer — not through the bot
+// credential chain. Any error hit here (before the RunE body fires) is
+// necessarily the pre-run bot-token gate incorrectly gating the request; a
+// downstream, op-layer error surfacing OCTO_DOC_* is the correct path and does
+// not fail this test.
+func TestNewRootCmd_HTMLLeafSkipsBotTokenGate(t *testing.T) {
+	f := newTestFactoryWithReg()
+	// Empty bot token: the gate would fail if it ran for html leaves.
+	f.SetConfig(&config.Config{APIBaseURL: "http://localhost", BotToken: ""})
+	// No OCTO_DOC_API_URL / OCTO_DOC_WRITE_TOKEN set so the op will fail
+	// downstream — that's fine, we only care that PreRunE does not gate first.
+	t.Setenv("OCTO_DOC_API_URL", "")
+	t.Setenv("OCTO_DOC_WRITE_TOKEN", "")
+	root := NewRootCmd(f.Factory)
+	root.SetArgs([]string{"html", "list"})
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	err := root.Execute()
+	if err == nil {
+		return // unlikely with unset env — but the whole point is the gate did not fire
+	}
+	wrapped := cmdutil.WrapCLIError(err)
+	ee := output.AsExitError(wrapped)
+	if ee == nil {
+		return // non-ExitError means it made it past PreRunE
+	}
+	// The one thing that MUST NOT happen: pre-run gate returned
+	// "OCTO_BOT_TOKEN is required" for an html leaf.
+	if strings.Contains(ee.Message, "OCTO_BOT_TOKEN") {
+		t.Fatalf("html leaf must skip OCTO_BOT_TOKEN gate; got pre-run gate error: %s", ee.Message)
+	}
+}

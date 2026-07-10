@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/client"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
+	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
 )
 
 // runOperation is the RunE body for every auto-registered operation.
@@ -43,6 +45,7 @@ func runOperation(cobraCmd *cobra.Command, f *cmdutil.Factory, rt *operationRunt
 	// Multipart ops take a separate path — they build a form body, not JSON.
 	req := client.Request{
 		Service:        serviceForBaseURL(d.BaseURLEnv),
+		BaseURLEnv:     d.BaseURLEnv,
 		Method:         d.Method,
 		Path:           urlPath,
 		Query:          q,
@@ -52,6 +55,12 @@ func runOperation(cobraCmd *cobra.Command, f *cmdutil.Factory, rt *operationRunt
 		// x-octo-space-header:false. An omitted flag keeps the default
 		// behaviour of sending the header when the credential has a space.
 		SuppressSpaceHeader: d.SpaceHeaderSet && !d.SpaceHeader,
+	}
+	// Spec-declared TokenEnv (html domain via x-octo-token-env) bypasses the
+	// bot-credential chain: read the bearer straight from env and stamp it as
+	// a request header. See injectSpecToken for the override rationale.
+	if err := injectSpecToken(f, &req, d.TokenEnv); err != nil {
+		return err
 	}
 	// Binary-response ops may carry an --output/-o destination; when set, the
 	// client writes the 2xx body to that path instead of only describing it.
@@ -88,7 +97,7 @@ func runOperation(cobraCmd *cobra.Command, f *cmdutil.Factory, rt *operationRunt
 		return runPaginated(ctx, f, rt, &req)
 	}
 
-	return emitOnce(ctx, f, &req)
+	return emitOnce(ctx, f, rt, &req)
 }
 
 // buildQuery assembles the URL query from flags the user explicitly set, so
@@ -175,10 +184,67 @@ func resolveBody(f *cmdutil.Factory, cobraCmd *cobra.Command, rt *operationRunti
 	return base, nil
 }
 
+// injectSpecToken populates req.Headers["Authorization"] from os.Getenv(env)
+// when env is non-empty. Reports a friendly auth_error (exit code 3) when the
+// declared env var is unset so the caller does not silently fall back to any
+// other credential. client.attempt sets Authorization from req.Headers AFTER
+// c.cred (client.go:207-218), so this override cleanly wins even if a stray
+// credential ever reaches the client.
+func injectSpecToken(f *cmdutil.Factory, req *client.Request, env string) error {
+	if env == "" {
+		return nil
+	}
+	token := strings.TrimSpace(os.Getenv(env))
+	if token == "" {
+		err := output.ErrAuth(
+			fmt.Sprintf("%s is not set", env),
+			fmt.Sprintf("set %s to your docs-html write token", env),
+		)
+		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
+		return err
+	}
+	if req.Headers == nil {
+		req.Headers = map[string]string{}
+	}
+	req.Headers["Authorization"] = "Bearer " + token
+	return nil
+}
+
+// clientForOp returns the client to use for an operation. Spec-declared
+// TokenEnv (e.g. html domain's OCTO_DOC_WRITE_TOKEN) bypasses the
+// bot-credential chain entirely: build a bot-token-less client from cfg alone
+// so f.Client()'s CredentialFunc hard-error path never fires when only the
+// docs token is set. Empty TokenEnv preserves the existing f.Client() path
+// for every bot-domain op.
+func clientForOp(f *cmdutil.Factory, d *registry.OperationDetail) (*client.Client, error) {
+	if d.TokenEnv == "" {
+		return f.Client()
+	}
+	cfg, err := f.Config()
+	if err != nil {
+		return nil, err
+	}
+	return client.New(cfg, nil, client.Options{
+		Verbose: f.Globals.Verbose,
+		DryRun:  f.Globals.DryRun,
+		NoRetry: f.Globals.NoRetry,
+		Timeout: f.Globals.Timeout,
+		ErrOut:  f.IOStreams.ErrOut,
+	}), nil
+}
+
 // emitOnce runs one request and emits the envelope. Returns the same error
-// value so cobra sets a non-zero exit code.
-func emitOnce(ctx context.Context, f *cmdutil.Factory, req *client.Request) error {
-	cli, err := f.Client()
+// value so cobra sets a non-zero exit code. rt may be nil for callers outside
+// the spec-driven engine (e.g. matter status aliases) — those always route
+// through the bot-credential client (f.Client()).
+func emitOnce(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime, req *client.Request) error {
+	var cli *client.Client
+	var err error
+	if rt == nil {
+		cli, err = f.Client()
+	} else {
+		cli, err = clientForOp(f, rt.detail)
+	}
 	if err != nil {
 		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 		return err
@@ -215,7 +281,7 @@ func runPaginated(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime,
 		return err
 	}
 
-	cli, err := f.Client()
+	cli, err := clientForOp(f, rt.detail)
 	if err != nil {
 		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 		return err
