@@ -126,6 +126,10 @@ func TestOctoHTMLCreationUsesDeterministicPublishAndNotify(t *testing.T) {
 	for _, want := range []string{
 		"html publish-and-notify",
 		"Never ask the model to assemble a type=17 payload",
+		"at most one transport attempt",
+		"does not promise exactly-once delivery",
+		"Never rerun `publish-and-notify` or republish the HTML",
+		"`--channel-type 1` (DM)",
 		"only completion",
 		"Do not send a second natural-language",
 		"doc_id, share_url, registered, status",
@@ -133,5 +137,8 @@ func TestOctoHTMLCreationUsesDeterministicPublishAndNotify(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Errorf("octo-html creation workflow must contain %q", want)
 		}
+	}
+	if strings.Contains(content, "publish and notify exactly once") {
+		t.Error("octo-html workflow must not promise exactly-once delivery")
 	}
 }

@@ -133,6 +133,73 @@ func TestHTMLPublishAndNotify_DoesNotRetryPublish(t *testing.T) {
 	}
 }
 
+func TestHTMLPublishAndNotify_DoesNotRetryTransientSendFailure(t *testing.T) {
+	sendCalls := 0
+	root, tf, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/docs" {
+			_, _ = w.Write([]byte(`{"slug":"report","version":1,"doc_id":"doc-1","share_url":"https://docs.example.test/d/doc-1","registered":true,"status":"published"}`))
+			return
+		}
+		sendCalls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"UPSTREAM_UNAVAILABLE","message":"try later"}}`))
+	})
+
+	root.SetArgs(validPublishAndNotifyArgs())
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected send error")
+	}
+	if sendCalls != 1 {
+		t.Fatalf("message send calls = %d, want 1", sendCalls)
+	}
+	assertUnknownDeliveryError(t, tf.ErrOut.String())
+}
+
+func TestHTMLPublishAndNotify_DoesNotRetryWhenSendResponseIsLost(t *testing.T) {
+	sendCalls := 0
+	root, tf, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/docs" {
+			_, _ = w.Write([]byte(`{"slug":"report","version":1,"doc_id":"doc-1","share_url":"https://docs.example.test/d/doc-1","registered":true,"status":"published"}`))
+			return
+		}
+		sendCalls++
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack response: %v", err)
+			return
+		}
+		_ = conn.Close()
+	})
+
+	root.SetArgs(validPublishAndNotifyArgs())
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected lost response error")
+	}
+	if sendCalls != 1 {
+		t.Fatalf("message send calls = %d, want 1", sendCalls)
+	}
+	assertUnknownDeliveryError(t, tf.ErrOut.String())
+}
+
+func TestHTMLPublishAndNotify_InvalidSendResponseIsUnknownDelivery(t *testing.T) {
+	root, tf, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/docs" {
+			_, _ = w.Write([]byte(`{"slug":"report","version":1,"doc_id":"doc-1","share_url":"https://docs.example.test/d/doc-1","registered":true,"status":"published"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"message_id":"42","message_seq":7}`))
+	})
+
+	root.SetArgs(validPublishAndNotifyArgs())
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected invalid message response error")
+	}
+	assertUnknownDeliveryError(t, tf.ErrOut.String())
+}
+
 func TestHTMLPublishAndNotify_InvalidPublishResponseDoesNotSend(t *testing.T) {
 	sendCalls := 0
 	root, tf, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +239,40 @@ func TestHTMLPublishAndNotify_ValidatesArgumentsBeforeRequests(t *testing.T) {
 	}
 	if !strings.Contains(tf.ErrOut.String(), "--channel-type must be 1, 2, or 5") {
 		t.Fatalf("stderr = %s", tf.ErrOut.String())
+	}
+}
+
+func TestHTMLPublishAndNotify_AppBotRejectsNonDMBeforePublish(t *testing.T) {
+	requests := 0
+	root, tf, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+	})
+	args := validPublishAndNotifyArgs()
+	args[len(args)-1] = "2"
+	root.SetArgs(args)
+
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected App Bot DM-only validation error")
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+	if !strings.Contains(tf.ErrOut.String(), "App Bot publish-and-notify destinations must use --channel-type 1") {
+		t.Fatalf("stderr = %s", tf.ErrOut.String())
+	}
+}
+
+func assertUnknownDeliveryError(t *testing.T, stderr string) {
+	t.Helper()
+	for _, want := range []string{
+		"DELIVERY_OUTCOME_UNKNOWN",
+		"delivery outcome unknown, DO NOT rerun publish-and-notify",
+		"不得重新发布",
+		"Do not rerun publish-and-notify or republish the HTML",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q: %s", want, stderr)
+		}
 	}
 }
 

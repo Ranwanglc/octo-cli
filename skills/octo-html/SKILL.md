@@ -37,12 +37,13 @@ All commands call `$OCTO_API_BASE_URL/v1/*` and return the `{data}/{error}` enve
 
 ## 1. Document lifecycle
 
-### Creation tasks: publish and notify exactly once
+### Creation tasks: deterministic publish and notify
 
 When a user-facing HTML creation task provides a `request_id` and destination
 channel, **you MUST finish with `octo-cli html publish-and-notify`**. This command
 publishes, requires synchronous docs-backend registration, constructs the
-type=17 result card in trusted CLI code, and sends it through `message send`.
+type=17 result card in trusted CLI code, and makes at most one transport attempt
+through `message send`.
 
 ```bash
 octo-cli html publish-and-notify \
@@ -61,8 +62,14 @@ octo-cli html publish-and-notify \
   completion event.
 - A successful `publish-and-notify` invocation is the **only completion
   message**. Do not send a second natural-language "done" message afterward.
-- If publishing, registration, response validation, or message sending fails,
-  report the command error. Never send or claim a false success card.
+- The command is deterministic but does not promise exactly-once delivery.
+  If message sending or its response fails, delivery may already have happened.
+  **Never rerun `publish-and-notify` or republish the HTML after an uncertain
+  delivery failure.** Check the DM and use manual or later recovery instead.
+- Other publish, registration, or response-validation failures must be reported
+  without sending or claiming a false success card.
+- This workflow sends only to `--channel-type 1` (DM). App Bot credentials are
+  rejected before publishing when a group or thread destination is requested.
 - Use `--mount-type group` or `--mount-type space`. Thread mounts are not
   registered and are rejected before publishing by this completion command.
 - The command requires one of `--html` or `--data`; `--data` may contain the

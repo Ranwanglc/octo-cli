@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/client"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
+	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
@@ -44,6 +47,11 @@ type htmlPublishResult struct {
 	ShareURL   string `json:"share_url"`
 	Registered bool   `json:"registered"`
 	Status     string `json:"status"`
+}
+
+type messageSendResult struct {
+	MessageID json.Number `json:"message_id"`
+	Raw       map[string]any
 }
 
 func attachHTMLPublishAndNotify(htmlCmd *cobra.Command, f *cmdutil.Factory) {
@@ -117,16 +125,17 @@ func runHTMLPublishAndNotify(cmd *cobra.Command, f *cmdutil.Factory, opts *publi
 	if err != nil {
 		return emitCommandError(f, err)
 	}
+	sendReq.NoRetry = true
 	sendRaw, err := cli.Do(cmd.Context(), sendReq)
+	if err != nil {
+		return emitCommandError(f, unknownDeliveryError(err.Error()))
+	}
+
+	message, err := parseMessageSendResult(sendRaw)
 	if err != nil {
 		return emitCommandError(f, err)
 	}
-
-	var message any
-	if err := json.Unmarshal(sendRaw, &message); err != nil {
-		return emitCommandError(f, output.ErrAPI("INVALID_MESSAGE_RESPONSE", "message send returned invalid JSON", "retry after checking the message service"))
-	}
-	out, err := json.Marshal(map[string]any{"publish": result, "message": message})
+	out, err := json.Marshal(map[string]any{"publish": result, "message": message.Raw})
 	if err != nil {
 		return emitCommandError(f, output.ErrWithHint("internal", "MARSHAL_FAILED", err.Error(), ""))
 	}
@@ -152,6 +161,13 @@ func validatePublishAndNotifyOptions(f *cmdutil.Factory, opts *publishAndNotifyO
 	if opts.channelType != 1 && opts.channelType != 2 && opts.channelType != 5 {
 		return output.ErrValidation("--channel-type must be 1, 2, or 5", "use 1=DM, 2=group, or 5=thread")
 	}
+	cred, err := f.Credential()
+	if err != nil {
+		return err
+	}
+	if cred != nil && credential.TokenKind(cred.Token) == "app_bot" && opts.channelType != 1 {
+		return output.ErrValidation("App Bot publish-and-notify destinations must use --channel-type 1", "send the result to the current DM channel; App Bots cannot send to groups or threads")
+	}
 	switch opts.mountType {
 	case "group":
 		if !idPattern.MatchString(opts.groupNo) {
@@ -165,6 +181,43 @@ func validatePublishAndNotifyOptions(f *cmdutil.Factory, opts *publishAndNotifyO
 		return output.ErrValidation("one of --html or --data is required", "pass HTML directly, via @file/@-, or in a JSON --data object")
 	}
 	return nil
+}
+
+func parseMessageSendResult(raw []byte) (*messageSendResult, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var envelope map[string]any
+	if err := decoder.Decode(&envelope); err != nil {
+		return nil, unknownDeliveryError("message send returned invalid JSON")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, unknownDeliveryError("message send returned trailing data")
+	}
+	message := envelope
+	if data, ok := envelope["data"]; ok {
+		var valid bool
+		message, valid = data.(map[string]any)
+		if !valid {
+			return nil, unknownDeliveryError("message send response data is not an object")
+		}
+	}
+	messageID, ok := message["message_id"].(json.Number)
+	if !ok {
+		return nil, unknownDeliveryError("message send response is missing integer message_id")
+	}
+	id, err := messageID.Int64()
+	if err != nil || id <= 0 {
+		return nil, unknownDeliveryError("message send response contains invalid message_id")
+	}
+	return &messageSendResult{MessageID: messageID, Raw: message}, nil
+}
+
+func unknownDeliveryError(detail string) error {
+	return output.ErrAPI(
+		"DELIVERY_OUTCOME_UNKNOWN",
+		fmt.Sprintf("message send may have succeeded but its response could not be confirmed: %s; delivery outcome unknown, DO NOT rerun publish-and-notify; 不得重新发布", detail),
+		"Do not rerun publish-and-notify or republish the HTML. Check the DM for the result card and use manual or later recovery if it is absent.",
+	)
 }
 
 func buildHTMLPublishBody(f *cmdutil.Factory, opts *publishAndNotifyOptions) (map[string]any, error) {
