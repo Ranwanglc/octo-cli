@@ -37,6 +37,37 @@ All commands call `$OCTO_API_BASE_URL/v1/*` and return the `{data}/{error}` enve
 
 ## 1. Document lifecycle
 
+### Creation tasks: publish and notify exactly once
+
+When a user-facing HTML creation task provides a `request_id` and destination
+channel, **you MUST finish with `octo-cli html publish-and-notify`**. This command
+publishes, requires synchronous docs-backend registration, constructs the
+type=17 result card in trusted CLI code, and sends it through `message send`.
+
+```bash
+octo-cli html publish-and-notify \
+  --slug runbook \
+  --html @/tmp/runbook.html \
+  --title "Runbook" \
+  --mount-type group \
+  --group-no <group_no> \
+  --request-id <request_id> \
+  --channel-id <current_dm_channel_id> \
+  --channel-type 1
+```
+
+- Never ask the model to assemble a type=17 payload or `octo_result` JSON.
+- Never call plain `html publish` for a creation task that expects a structured
+  completion event.
+- A successful `publish-and-notify` invocation is the **only completion
+  message**. Do not send a second natural-language "done" message afterward.
+- If publishing, registration, response validation, or message sending fails,
+  report the command error. Never send or claim a false success card.
+- Use `--mount-type group` or `--mount-type space`. Thread mounts are not
+  registered and are rejected before publishing by this completion command.
+- The command requires one of `--html` or `--data`; `--data` may contain the
+  HTML body, while the explicit slug/title/mount flags remain authoritative.
+
 ```bash
 # Publish a self-contained HTML document under a slug. New slug = create;
 # existing slug = append a new immutable version. --data is a JSON object.
@@ -44,7 +75,7 @@ All commands call `$OCTO_API_BASE_URL/v1/*` and return the `{data}/{error}` enve
 # sidebar-registration note below); include it on every publish that should
 # appear in the file sidebar.
 octo-cli html publish --data '{"slug":"runbook","html":"<html><body><h1>Runbook</h1></body></html>","meta":{"title":"Runbook"},"mount_type":"group","group_no":"<group_no>"}'
-#   → { slug, version, url, size, aids, merged_comments }
+#   → { slug, version, url, doc_id, share_url, registered, status, size, aids, merged_comments }
 
 # Register the doc into the file sidebar: pass mount_type (non-empty) on every
 # publish that should be visible there. Omitting it is valid per the spec, but

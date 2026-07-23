@@ -83,6 +83,10 @@
                     "slug": { "type": "string" },
                     "version": { "type": "integer" },
                     "url": { "type": "string" },
+                    "doc_id": { "type": "string", "description": "docs-backend document id after sidebar registration" },
+                    "share_url": { "type": "string", "format": "uri", "description": "registered document deep link" },
+                    "registered": { "type": "boolean", "description": "true only when docs-backend registration completed" },
+                    "status": { "type": "string", "description": "publish and registration outcome; success is published" },
                     "size": { "type": "integer" },
                     "aids": { "type": "integer" },
                     "merged_comments": { "type": "integer" }

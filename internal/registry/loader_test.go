@@ -142,6 +142,22 @@ func TestGetOperationMessageSend_DMWorkimBase(t *testing.T) {
 	}
 }
 
+func TestHTMLPublishResponseIncludesRegistrationResult(t *testing.T) {
+	r := MustNew()
+	op, ok := r.GetOperation("html.publish")
+	if !ok {
+		t.Fatal("html.publish not found")
+	}
+	if op.ResponseSchema == nil {
+		t.Fatal("html.publish response schema missing")
+	}
+	for _, name := range []string{"doc_id", "share_url", "registered", "status"} {
+		if _, ok := op.ResponseSchema.Properties[name]; !ok {
+			t.Errorf("html.publish response schema missing %q", name)
+		}
+	}
+}
+
 // TestServiceSpaceHeaderContract pins the space-header declaration of every
 // service spec so an accidental flip is caught. The client suppresses
 // X-Space-Id only when a spec explicitly declares x-octo-space-header:false

@@ -2,7 +2,8 @@
 // container and holds root-level persistent flags. Service-domain commands are
 // auto-registered from the embedded OpenAPI registry via cmd/service — the
 // hand-written leaves are `schema`, `version`, `api` (generic passthrough),
-// `config`, `skills`, `auth`, and `sheet-cell` (offline value→cell helper).
+// `config`, `skills`, `auth`, `sheet-cell` (offline value→cell helper), and the
+// cross-operation `html publish-and-notify` orchestration command.
 package cmd
 
 import (

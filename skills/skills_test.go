@@ -116,3 +116,22 @@ func TestOctoMarketplacePublishFlowChecksOwnedNameBeforeMutation(t *testing.T) {
 		t.Error("category lookup must happen before the final confirmation plan")
 	}
 }
+
+func TestOctoHTMLCreationUsesDeterministicPublishAndNotify(t *testing.T) {
+	b, err := FS.ReadFile("octo-html/SKILL.md")
+	if err != nil {
+		t.Fatalf("read octo-html skill: %v", err)
+	}
+	content := string(b)
+	for _, want := range []string{
+		"html publish-and-notify",
+		"Never ask the model to assemble a type=17 payload",
+		"only completion",
+		"Do not send a second natural-language",
+		"doc_id, share_url, registered, status",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("octo-html creation workflow must contain %q", want)
+		}
+	}
+}

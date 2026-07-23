@@ -41,6 +41,9 @@ func RegisterServiceCommands(parent *cobra.Command, f *cmdutil.Factory) {
 		if svc == "matter" {
 			attachMatterStatusAliases(svcCmd, f)
 		}
+		if svc == "html" {
+			attachHTMLPublishAndNotify(svcCmd, f)
+		}
 	}
 }
 

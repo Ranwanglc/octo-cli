@@ -72,6 +72,10 @@ type Request struct {
 	// server-side). The default (false) preserves the historical behaviour of
 	// sending X-Space-Id whenever the credential has a space.
 	SuppressSpaceHeader bool
+	// NoRetry disables transport retries for this request only. Use it for
+	// non-idempotent operations whose response loss could otherwise duplicate
+	// a successful mutation.
+	NoRetry bool
 }
 
 // Client is the REST client. Created via New; invoked by command layer via Do.
@@ -161,13 +165,13 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 		return c.renderDryRun(req.Method, u, req.Headers, bodyBytes, req.SuppressSpaceHeader)
 	}
 
-	return c.doWithRetry(ctx, req.Method, u, req.Headers, bodyBytes, contentType, req.BinaryResponse, req.OutputPath, req.SuppressSpaceHeader)
+	return c.doWithRetry(ctx, req.Method, u, req.Headers, bodyBytes, contentType, req.BinaryResponse, req.OutputPath, req.SuppressSpaceHeader, req.NoRetry)
 }
 
 // doWithRetry runs the HTTP request, retrying transient errors with backoff.
-func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, headers map[string]string, body []byte, contentType string, binaryResp bool, outputPath string, suppressSpaceHeader bool) ([]byte, error) {
+func (c *Client) doWithRetry(ctx context.Context, method, urlStr string, headers map[string]string, body []byte, contentType string, binaryResp bool, outputPath string, suppressSpaceHeader, noRetry bool) ([]byte, error) {
 	maxRetries := defaultMaxRetries
-	if c.options.NoRetry {
+	if c.options.NoRetry || noRetry {
 		maxRetries = 0
 	}
 
