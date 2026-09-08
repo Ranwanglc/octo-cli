@@ -10,6 +10,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-cli/cmd/service"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
+	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
 )
 
 // NewRootCmd builds the top-level command tree.
@@ -24,6 +25,13 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 		Long:  "octo-cli is a CLI for AI Agent Bots to interact with Octo services.\nService commands are generated from the embedded OpenAPI registry.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if skipValidation(cmd) {
+				return nil
+			}
+			// Ops in a domain that declares x-octo-token-env (e.g. html →
+			// OCTO_DOC_WRITE_TOKEN) route their auth through the spec token,
+			// not the bot chain, so cfg.Validate's OCTO_BOT_TOKEN gate does
+			// not apply. The op layer verifies the spec token itself.
+			if hasSpecTokenEnv(cmd, f.Registry()) {
 				return nil
 			}
 			cfg, err := f.Config()
@@ -103,4 +111,45 @@ func skipValidation(cmd *cobra.Command) bool {
 		}
 	}
 	return false
+}
+
+// hasSpecTokenEnv reports whether cmd belongs to a service domain whose spec
+// declares x-octo-token-env for any operation (i.e. the domain authenticates
+// via a spec-declared bearer instead of the bot credential chain). Walks the
+// parent chain to the immediate child of root — that node's Name() is the
+// service domain — and asks the registry. Missing registry / not-a-service
+// path returns false so the caller falls through to the bot-token gate.
+func hasSpecTokenEnv(cmd *cobra.Command, reg interface {
+	ListOperations(string) []registry.OperationInfo
+	GetOperation(string) (*registry.OperationDetail, bool)
+}) bool {
+	if reg == nil || cmd == nil {
+		return false
+	}
+	svc := serviceDomainName(cmd)
+	if svc == "" {
+		return false
+	}
+	for _, op := range reg.ListOperations(svc) {
+		if d, ok := reg.GetOperation(op.ID); ok && d.TokenEnv != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// serviceDomainName walks up to the direct child of the root command and
+// returns its Name — that node is the service domain (e.g. "html", "thread").
+// Returns "" for hand-written top-level leaves (version/schema/config/etc.)
+// where no parent walk lands on a service domain.
+func serviceDomainName(cmd *cobra.Command) string {
+	if cmd.Parent() == nil {
+		return ""
+	}
+	for c := cmd; c != nil && c.Parent() != nil; c = c.Parent() {
+		if c.Parent().Parent() == nil {
+			return c.Name()
+		}
+	}
+	return ""
 }

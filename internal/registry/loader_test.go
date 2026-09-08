@@ -10,7 +10,7 @@ func TestNewLoadsAllServices(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	got := r.ListServices()
-	want := []string{"bot", "docs", "event", "file", "group", "matter", "message", "thread"}
+	want := []string{"bot", "docs", "event", "file", "group", "html", "matter", "message", "thread"}
 	if len(got) != len(want) {
 		t.Fatalf("ListServices: got %d services, want %d (%v)", len(got), len(want), got)
 	}
@@ -42,6 +42,7 @@ func TestAllDomainOperationCounts(t *testing.T) {
 		"bot":     6,
 		"event":   2,
 		"docs":    29,
+		"html":    1,
 	}
 	totalWant := 0
 	for svc, want := range expected {
@@ -437,4 +438,47 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestGetOperationHTMLList_TokenEnv pins the x-octo-token-env loader
+// extension: html domain declares OCTO_DOC_WRITE_TOKEN, so the OperationDetail
+// carries it, so the service engine can route the html domain's auth through
+// the spec token instead of the bot-credential chain. Without this the
+// PreRunE spec-token skip in cmd/root.go could never fire for html leaves.
+func TestGetOperationHTMLList_TokenEnv(t *testing.T) {
+	r := MustNew()
+	op, ok := r.GetOperation("html.list")
+	if !ok {
+		t.Fatal("html.list not found")
+	}
+	if op.BaseURLEnv != "OCTO_DOC_API_URL" {
+		t.Errorf("base url env: got %q, want OCTO_DOC_API_URL", op.BaseURLEnv)
+	}
+	if op.TokenEnv != "OCTO_DOC_WRITE_TOKEN" {
+		t.Errorf("token env: got %q, want OCTO_DOC_WRITE_TOKEN", op.TokenEnv)
+	}
+	if op.SpaceHeader {
+		t.Error("html: x-octo-space-header must be false")
+	}
+	if op.Method != "GET" {
+		t.Errorf("method: got %q, want GET", op.Method)
+	}
+	if op.Path != "/v1/docs" {
+		t.Errorf("path: got %q, want /v1/docs", op.Path)
+	}
+}
+
+// TestGetOperationMatterCreate_NoTokenEnv proves the loader does not fabricate
+// TokenEnv values for bot-domain ops — only specs that declare x-octo-token-env
+// carry it, so the PreRunE skip stays targeted at the html domain and does not
+// silently exempt bot leaves from the bot-token gate.
+func TestGetOperationMatterCreate_NoTokenEnv(t *testing.T) {
+	r := MustNew()
+	op, ok := r.GetOperation("matter.create")
+	if !ok {
+		t.Fatal("matter.create not found")
+	}
+	if op.TokenEnv != "" {
+		t.Errorf("bot-domain op should have empty TokenEnv, got %q", op.TokenEnv)
+	}
 }

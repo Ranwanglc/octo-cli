@@ -49,7 +49,13 @@ type Options struct {
 // For non-JSON payloads (e.g. multipart uploads) set RawBody + ContentType.
 // When RawBody is non-nil, Body is ignored and no JSON marshaling is performed.
 type Request struct {
-	Service     string
+	Service string
+	// BaseURLEnv is the spec-declared x-octo-base-url env var name for this
+	// operation (e.g. "OCTO_DOC_API_URL"). Used only to make the
+	// "no base URL configured" error hint point at the right env var when
+	// Config.ServiceURL returns empty. When empty the hint falls back to
+	// OCTO_API_BASE_URL, preserving historical behaviour for bot-domain ops.
+	BaseURLEnv  string
 	Method      string
 	Path        string
 	Query       url.Values
@@ -123,9 +129,13 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 	}
 	base := c.cfg.ServiceURL(req.Service)
 	if base == "" {
+		hintEnv := config.EnvAPIBaseURL
+		if req.BaseURLEnv != "" {
+			hintEnv = req.BaseURLEnv
+		}
 		return nil, output.ErrValidation(
 			fmt.Sprintf("no base URL configured for service %q", req.Service),
-			fmt.Sprintf("set %s", config.EnvAPIBaseURL),
+			fmt.Sprintf("set %s", hintEnv),
 		)
 	}
 
@@ -367,8 +377,12 @@ func (c *Client) renderDryRun(method, urlStr string, headers map[string]string, 
 	if c.cred != nil && c.cred.SpaceID != "" && !suppressSpaceHeader {
 		hdr["X-Space-Id"] = c.cred.SpaceID
 	}
+	// Caller-provided headers may carry spec-injected secrets (e.g. html domain
+	// injects Authorization from OCTO_DOC_WRITE_TOKEN via injectSpecToken).
+	// Sanitize every entry so --dry-run never prints raw tokens, regardless of
+	// where they came from â bot credential mask alone is not enough.
 	for k, v := range headers {
-		hdr[k] = v
+		hdr[k] = sanitizeDryRunHeader(k, v)
 	}
 	out := map[string]any{
 		"dry_run": true,
@@ -384,6 +398,58 @@ func (c *Client) renderDryRun(method, urlStr string, headers map[string]string, 
 		return nil, output.ErrWithHint("internal", "MARSHAL_FAILED", err.Error(), "")
 	}
 	return buf, nil
+}
+
+// sanitizeDryRunHeader returns a display-safe value for a request header.
+// The dry-run renderer prints this to stdout, so any value that carries a
+// secret (spec-injected bearer tokens, API keys) must be masked at the source.
+// Missing this is how OCT-153's docs write token leaked: spec token was
+// injected into req.Headers["Authorization"] and the renderer copied the map
+// verbatim, bypassing the bot-credential mask.
+//
+// Coverage rule: mask by header name, case-insensitive, on the well-known set
+// (Authorization + common API-key aliases). Unknown headers pass through.
+// Empty values pass through so absent-token bugs stay visible in dry-run.
+func sanitizeDryRunHeader(name, value string) string {
+	if value == "" {
+		return value
+	}
+	switch strings.ToLower(name) {
+	case "authorization", "proxy-authorization",
+		"cookie", "set-cookie",
+		"x-api-key", "x-auth-token", "x-access-token":
+		return maskHeaderValue(value)
+	}
+	return value
+}
+
+// maskHeaderValue masks the secret portion of a header value while keeping
+// the auth scheme (e.g. "Bearer") visible so a debugging user can still see
+// the shape of the request. Falls back to "***" for scheme-less values.
+func maskHeaderValue(value string) string {
+	if scheme, tok, ok := splitAuthScheme(value); ok {
+		return scheme + " " + credential.MaskToken(tok)
+	}
+	return credential.MaskToken(value)
+}
+
+// splitAuthScheme peels an "<Scheme> <token>" prefix. Returns (scheme, tok,
+// true) when the value starts with a recognized single-word scheme followed
+// by a space; otherwise (_, _, false). Kept private to the client package.
+func splitAuthScheme(value string) (scheme, token string, ok bool) {
+	i := strings.IndexByte(value, ' ')
+	if i <= 0 || i == len(value)-1 {
+		return "", "", false
+	}
+	scheme = value[:i]
+	// Reject if the "scheme" contains chars that would mean this isn't an
+	// RFC 7235 credential (e.g. a JWT stuffed straight into the header).
+	for _, r := range scheme {
+		if (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return "", "", false
+		}
+	}
+	return scheme, value[i+1:], true
 }
 
 // --- helpers ---

@@ -200,10 +200,12 @@ func extractPathParams(path string) []string {
 	}
 }
 
-// serviceForBaseURL maps the spec's x-octo-base-url env-var name to the
-// config-level service key used by client.Request.Service. With the unified
-// gateway model all services route to the same URL, so this always returns
-// empty (default service). Retained for interface compatibility.
-func serviceForBaseURL(_ string) string {
-	return ""
+// serviceForBaseURL returns the config-level service key for
+// client.Request.Service. It now passes the spec-declared x-octo-base-url env
+// var name straight through — Config.ServiceURL maps "" / "default" /
+// EnvAPIBaseURL back to the unified bot API base URL, and any other env name
+// (e.g. "OCTO_DOC_API_URL") resolves to os.Getenv(envName) so a spec can add a
+// new backend just by declaring x-octo-base-url and x-octo-token-env.
+func serviceForBaseURL(baseURLEnv string) string {
+	return baseURLEnv
 }

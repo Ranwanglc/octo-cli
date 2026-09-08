@@ -108,6 +108,10 @@ var backendErrorMapping = map[string]struct {
 	"CONFLICT":             {"validation", "resource state conflicts; re-read and retry"},
 	"PRECONDITION_FAILED":  {"validation", "base version stale; re-read to get the current base version, then retry"},
 	"UNPROCESSABLE_ENTITY": {"validation", "request understood but semantically invalid; check field shapes"},
+	// docs-html envelope adds two codes the bot API does not use — map them
+	// so the html domain returns the taxonomy/exit-code shape agents expect.
+	"AUTH_REQUIRED":          {"auth_error", "set OCTO_DOC_WRITE_TOKEN or refresh it"},
+	"UNSUPPORTED_MEDIA_TYPE": {"validation", "check request Content-Type"},
 }
 
 // ParseBackendError converts an HTTP response body (and status) to an *ExitError.

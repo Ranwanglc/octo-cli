@@ -854,3 +854,236 @@ func TestTruncate(t *testing.T) {
 		t.Errorf("truncate marker missing: %q", got)
 	}
 }
+
+// --- dry-run header sanitization (OCT-153 reviewer blocker) ---
+//
+// injectSpecToken (cmd/service/run.go) writes spec-declared bearer tokens into
+// req.Headers["Authorization"] for spec-token domains like `html list`. Before
+// the sanitizer landed, renderDryRun copied req.Headers verbatim into stdout,
+// leaking OCTO_DOC_WRITE_TOKEN. Lock in "spec-injected Authorization is masked
+// in dry-run" so a future edit to renderDryRun can't silently regress.
+
+func TestDo_DryRun_SanitizesSpecInjectedAuthorization(t *testing.T) {
+	cfg := &config.Config{APIBaseURL: "http://ignored"}
+	// cred == nil mirrors the html chain (bypasses bot credential entirely).
+	c := New(cfg, nil, Options{DryRun: true})
+
+	body, err := c.Do(context.Background(), &Request{
+		Method: "GET", Path: "/v1/docs",
+		Headers: map[string]string{"Authorization": "Bearer s3cr3t_doc_token_XYZ"},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	var out map[string]any
+	if jerr := json.Unmarshal(body, &out); jerr != nil {
+		t.Fatalf("unmarshal: %v\n%s", jerr, body)
+	}
+	hdr, _ := out["headers"].(map[string]any)
+	got, _ := hdr["Authorization"].(string)
+	if got == "" {
+		t.Fatalf("Authorization header missing in dry-run output: %v", out)
+	}
+	if strings.Contains(got, "s3cr3t_doc_token_XYZ") {
+		t.Fatalf("dry-run leaked raw doc token: %q", got)
+	}
+	if !strings.HasPrefix(got, "Bearer ") {
+		t.Errorf("Bearer scheme lost: %q", got)
+	}
+}
+
+func TestDo_DryRun_SanitizesCommonSecretHeaders(t *testing.T) {
+	cfg := &config.Config{APIBaseURL: "http://ignored"}
+	c := New(cfg, nil, Options{DryRun: true})
+
+	body, err := c.Do(context.Background(), &Request{
+		Method: "GET", Path: "/x",
+		Headers: map[string]string{
+			"X-Api-Key":           "super_secret_key_value",
+			"X-Auth-Token":        "another_secret",
+			"proxy-authorization": "Basic dXNlcjpwYXNzd29yZA==",
+			"X-Correlation-Id":    "corr-123", // non-sensitive, must pass through
+		},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	var out map[string]any
+	if jerr := json.Unmarshal(body, &out); jerr != nil {
+		t.Fatalf("unmarshal: %v\n%s", jerr, body)
+	}
+	hdr, _ := out["headers"].(map[string]any)
+	for _, k := range []string{"X-Api-Key", "X-Auth-Token", "proxy-authorization"} {
+		v, _ := hdr[k].(string)
+		if v == "" {
+			t.Errorf("%s missing", k)
+			continue
+		}
+		for _, leak := range []string{"super_secret_key_value", "another_secret", "dXNlcjpwYXNzd29yZA=="} {
+			if strings.Contains(v, leak) {
+				t.Errorf("%s leaked raw secret: %q", k, v)
+			}
+		}
+	}
+	if got, _ := hdr["X-Correlation-Id"].(string); got != "corr-123" {
+		t.Errorf("non-sensitive header X-Correlation-Id was mangled: %q", got)
+	}
+}
+
+func TestSanitizeDryRunHeader_UnknownHeaderPassesThrough(t *testing.T) {
+	// Unknown headers must not be silently mangled: dry-run has to stay a
+	// faithful debugging tool, only auth-adjacent values are worth masking.
+	if got := sanitizeDryRunHeader("X-Trace-Id", "abc123"); got != "abc123" {
+		t.Errorf("unknown header mangled: %q", got)
+	}
+	if got := sanitizeDryRunHeader("Authorization", ""); got != "" {
+		t.Errorf("empty Authorization mangled: %q", got)
+	}
+}
+
+func TestMaskHeaderValue_KeepsAuthScheme(t *testing.T) {
+	// Bearer/Basic schemes stay visible so operators can tell request shape
+	// apart from a missing header.
+	cases := []struct {
+		in       string
+		wantPfx  string
+		wantMask string
+	}{
+		{"Bearer app_1a1234567g8h9", "Bearer ", "app_1a***g8h9"},
+		{"Bearer s3cr3t_doc_token_XYZ", "Bearer ", "***"}, // unknown-prefix docs token → "***"
+		{"Basic dXNlcjpwYXNz", "Basic ", "***"},
+		{"just_a_raw_token_no_scheme", "", "***"},
+	}
+	for _, tc := range cases {
+		got := maskHeaderValue(tc.in)
+		if tc.wantPfx != "" {
+			if !strings.HasPrefix(got, tc.wantPfx) {
+				t.Errorf("maskHeaderValue(%q) = %q, want prefix %q", tc.in, got, tc.wantPfx)
+			}
+		}
+		if !strings.Contains(got, tc.wantMask) {
+			t.Errorf("maskHeaderValue(%q) = %q, want contains %q", tc.in, got, tc.wantMask)
+		}
+		// Never allow the raw body chars past the scheme to survive verbatim.
+		if strings.Contains(got, "1234567g8h") || strings.Contains(got, "s3cr3t_doc_token") ||
+			strings.Contains(got, "dXNlcjpwYXNz") || (tc.wantPfx == "" && got == tc.in) {
+			t.Errorf("maskHeaderValue(%q) leaked: %q", tc.in, got)
+		}
+	}
+}
+
+// --- Leader directive follow-ups (OCT-153): explicit case-insensitivity +
+// spec-token-overrides-cred coverage, plus Cookie in the sensitive set. ---
+
+func TestDo_DryRun_SensitiveHeaderNameIsCaseInsensitive(t *testing.T) {
+	cfg := &config.Config{APIBaseURL: "http://ignored"}
+	c := New(cfg, nil, Options{DryRun: true})
+
+	// Same secret under three case variants — Go map keys are case-sensitive,
+	// so all three coexist in req.Headers. sanitizeDryRunHeader must recognize
+	// each as Authorization regardless of casing.
+	body, err := c.Do(context.Background(), &Request{
+		Method: "GET", Path: "/x",
+		Headers: map[string]string{
+			"Authorization": "Bearer secretA_XYZ",
+			"authorization": "Bearer secretB_XYZ",
+			"AUTHORIZATION": "Bearer secretC_XYZ",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	var out map[string]any
+	if jerr := json.Unmarshal(body, &out); jerr != nil {
+		t.Fatalf("unmarshal: %v\n%s", jerr, body)
+	}
+	hdr, _ := out["headers"].(map[string]any)
+	for _, k := range []string{"Authorization", "authorization", "AUTHORIZATION"} {
+		v, _ := hdr[k].(string)
+		if v == "" {
+			t.Errorf("%s missing (map key not preserved verbatim)", k)
+			continue
+		}
+		for _, leak := range []string{"secretA_XYZ", "secretB_XYZ", "secretC_XYZ"} {
+			if strings.Contains(v, leak) {
+				t.Errorf("case %q leaked raw token: %q", k, v)
+			}
+		}
+	}
+}
+
+func TestDo_DryRun_SpecInjectedAuthorizationOverridesCredMask(t *testing.T) {
+	// Real world: html chain runs cred=nil, but the safety guarantee must also
+	// hold if a bot cred is present and the op layer injects a spec token on
+	// top. renderDryRun copies caller Headers *after* the cred-derived
+	// Authorization, so the caller wins — and must still be masked.
+	cfg := &config.Config{APIBaseURL: "http://ignored"}
+	cred := &credential.BotCredential{Token: "app_bot_alpha_1234"}
+	c := New(cfg, cred, Options{DryRun: true})
+
+	body, err := c.Do(context.Background(), &Request{
+		Method: "GET", Path: "/v1/docs",
+		Headers: map[string]string{"Authorization": "Bearer spec_XYZ_should_be_masked"},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	var out map[string]any
+	if jerr := json.Unmarshal(body, &out); jerr != nil {
+		t.Fatalf("unmarshal: %v\n%s", jerr, body)
+	}
+	hdr, _ := out["headers"].(map[string]any)
+	got, _ := hdr["Authorization"].(string)
+	if got == "" {
+		t.Fatalf("Authorization missing: %v", out)
+	}
+	if strings.Contains(got, "spec_XYZ_should_be_masked") {
+		t.Fatalf("dry-run leaked spec token when cred also present: %q", got)
+	}
+	// Must reflect the spec token's mask (Bearer *** for unknown-prefix token),
+	// not the bot cred's mask (which would still contain "app_bot" prefix).
+	if strings.Contains(got, "app_bot") {
+		t.Fatalf("dry-run shows bot cred instead of caller-overridden spec header: %q", got)
+	}
+	if !strings.HasPrefix(got, "Bearer ") {
+		t.Errorf("Bearer scheme lost: %q", got)
+	}
+}
+
+func TestDo_DryRun_CookieHeaderIsMasked(t *testing.T) {
+	// Session cookies can carry auth material; per Leader directive, treat as
+	// sensitive so a stray Cookie in req.Headers (future op or user via api
+	// leaf's --header flag) never lands raw in dry-run output.
+	cfg := &config.Config{APIBaseURL: "http://ignored"}
+	c := New(cfg, nil, Options{DryRun: true})
+
+	body, err := c.Do(context.Background(), &Request{
+		Method: "GET", Path: "/x",
+		Headers: map[string]string{"Cookie": "sessionid=raw_session_secret_ABC"},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	var out map[string]any
+	if jerr := json.Unmarshal(body, &out); jerr != nil {
+		t.Fatalf("unmarshal: %v\n%s", jerr, body)
+	}
+	hdr, _ := out["headers"].(map[string]any)
+	got, _ := hdr["Cookie"].(string)
+	if strings.Contains(got, "raw_session_secret_ABC") {
+		t.Fatalf("Cookie leaked raw session secret: %q", got)
+	}
+	if got == "" {
+		t.Errorf("Cookie header dropped: %v", out)
+	}
+}
+
+func TestSanitizeDryRunHeader_CookieIsRecognized(t *testing.T) {
+	// Direct unit-level check that Cookie/Set-Cookie land in the sensitive set.
+	for _, name := range []string{"Cookie", "cookie", "COOKIE", "Set-Cookie", "set-cookie"} {
+		got := sanitizeDryRunHeader(name, "sessionid=leak_me_please")
+		if strings.Contains(got, "leak_me_please") {
+			t.Errorf("sanitizeDryRunHeader(%q, ...) leaked: %q", name, got)
+		}
+	}
+}
